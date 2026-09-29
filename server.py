@@ -257,6 +257,73 @@ def warcraftlogs_graphql(query: str, variables_json: str = "{}") -> str:
 
     return _json(_graphql(query, variables))
 
+def _run_analysis_probe() -> None:
+    codes = ["Cq2Lm6ZJQ8pFKY91", "McHnAzfxQPKqg9j8"]
+    summary_query = """
+    query ProbeSummary($code: String!) {
+      reportData {
+        report(code: $code) {
+          code title startTime endTime revision segments
+          zone { id name }
+          fights {
+            id name startTime endTime kill difficulty encounterID
+            friendlyPlayers friendlySpecs
+          }
+          masterData(translate: false) {
+            actors { id name type subType }
+          }
+        }
+      }
+      rateLimitData { limitPerHour pointsSpentThisHour pointsResetIn }
+    }
+    """
+    sample_query = """
+    query ProbeSample($code: String!, $fightIDs: [Int]) {
+      reportData {
+        report(code: $code) {
+          damage: table(dataType: DamageDone, fightIDs: $fightIDs, translate: false, viewBy: Source)
+          healing: table(dataType: Healing, fightIDs: $fightIDs, translate: false, viewBy: Source)
+          deaths: table(dataType: Deaths, fightIDs: $fightIDs, translate: false, viewBy: Source)
+          taken: table(dataType: DamageTaken, fightIDs: $fightIDs, translate: false, viewBy: Target)
+          casts: table(dataType: Casts, fightIDs: $fightIDs, translate: false, viewBy: Source)
+          interrupts: table(dataType: Interrupts, fightIDs: $fightIDs, translate: false, viewBy: Source)
+          dispels: table(dataType: Dispels, fightIDs: $fightIDs, translate: false, viewBy: Source)
+        }
+      }
+    }
+    """
+    def shape(v: Any) -> Any:
+        if isinstance(v, dict):
+            out = {}
+            for k, val in v.items():
+                if isinstance(val, list):
+                    out[k] = {"len": len(val), "sample": [shape(x) for x in val[:2]]}
+                elif isinstance(val, dict):
+                    out[k] = shape(val)
+                else:
+                    out[k] = val
+            return out
+        if isinstance(v, list):
+            return {"len": len(v), "sample": [shape(x) for x in v[:2]]}
+        return v
+
+    for code in codes:
+        try:
+            summary = _graphql(summary_query, {"code": code})
+            print("WCLPROBE_SUMMARY " + _json(summary), flush=True)
+            report = (((summary.get("data") or {}).get("reportData") or {}).get("report") or {})
+            fights = [f for f in (report.get("fights") or []) if f.get("encounterID")]
+            if fights:
+                sample_fight = fights[-1]
+                sample = _graphql(sample_query, {"code": code, "fightIDs": [sample_fight["id"]]})
+                print(
+                    "WCLPROBE_SAMPLE "
+                    + _json({"code": code, "fight": sample_fight, "shape": shape(sample)}),
+                    flush=True,
+                )
+        except Exception as exc:
+            print("WCLPROBE_ERROR " + _json({"code": code, "error": repr(exc)}), flush=True)
+
 
 if __name__ == "__main__":
     # Fail fast if the configured Warcraft Logs credentials cannot authenticate.
@@ -270,6 +337,7 @@ if __name__ == "__main__":
     }
     """)
     print("Warcraft Logs API authentication OK", flush=True)
+    _run_analysis_probe()
 
     port = int(os.getenv("PORT", "10000"))
     security = TransportSecuritySettings(enable_dns_rebinding_protection=False)
