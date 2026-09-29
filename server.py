@@ -1277,8 +1277,6 @@ if __name__ == "__main__":
     }
     """)
     print("Warcraft Logs API authentication OK", flush=True)
-    _selftest = _build_raid_snapshot("Cq2Lm6ZJQ8pFKY91", 3445)
-    print("WCL_ANALYSIS_SELFTEST " + _json({"fights": len(_selftest.get("fights") or []), "players": len(_selftest.get("players") or []), "wipes": len(_selftest.get("wipes") or []), "cache": _selftest.get("resultCacheUsed")}), flush=True)
 
     port = int(os.getenv("PORT", "10000"))
     security = TransportSecuritySettings(enable_dns_rebinding_protection=False)
