@@ -259,15 +259,17 @@ def warcraftlogs_graphql(query: str, variables_json: str = "{}") -> str:
 
 def _run_analysis_probe() -> None:
     codes = ["Cq2Lm6ZJQ8pFKY91", "McHnAzfxQPKqg9j8"]
+    encounter_id = 3445
+
     summary_query = """
-    query ProbeSummary($code: String!) {
+    query AnalysisSummary($code: String!) {
       reportData {
         report(code: $code) {
-          code title startTime endTime revision segments
-          zone { id name }
-          fights {
+          code title startTime endTime
+          fights(encounterID: 3445) {
             id name startTime endTime kill difficulty encounterID
-            friendlyPlayers friendlySpecs
+            fightPercentage bossPercentage averageItemLevel
+            friendlyPlayers friendlySpecs friendlyItemLevels
           }
           masterData(translate: false) {
             actors { id name type subType }
@@ -277,52 +279,237 @@ def _run_analysis_probe() -> None:
       rateLimitData { limitPerHour pointsSpentThisHour pointsResetIn }
     }
     """
-    sample_query = """
-    query ProbeSample($code: String!, $fightIDs: [Int]) {
+
+    aggregate_query = """
+    query AnalysisAggregate($code: String!, $fightIDs: [Int]) {
       reportData {
         report(code: $code) {
-          damage: table(dataType: DamageDone, fightIDs: $fightIDs, translate: false, viewBy: Source)
-          healing: table(dataType: Healing, fightIDs: $fightIDs, translate: false, viewBy: Source)
-          deaths: table(dataType: Deaths, fightIDs: $fightIDs, translate: false, viewBy: Source)
-          taken: table(dataType: DamageTaken, fightIDs: $fightIDs, translate: false, viewBy: Target)
-          casts: table(dataType: Casts, fightIDs: $fightIDs, translate: false, viewBy: Source)
-          interrupts: table(dataType: Interrupts, fightIDs: $fightIDs, translate: false, viewBy: Source)
-          dispels: table(dataType: Dispels, fightIDs: $fightIDs, translate: false, viewBy: Source)
+          damage: table(dataType: DamageDone, fightIDs: $fightIDs, hostilityType: Friendlies, translate: false, viewBy: Source)
+          healing: table(dataType: Healing, fightIDs: $fightIDs, hostilityType: Friendlies, translate: false, viewBy: Source)
+          casts: table(dataType: Casts, fightIDs: $fightIDs, hostilityType: Friendlies, translate: false, viewBy: Source)
+          deaths: table(dataType: Deaths, fightIDs: $fightIDs, hostilityType: Friendlies, translate: false, viewBy: Source)
+          taken: table(dataType: DamageTaken, fightIDs: $fightIDs, hostilityType: Friendlies, translate: false, viewBy: Target)
+          debuffs: table(dataType: Debuffs, fightIDs: $fightIDs, hostilityType: Friendlies, translate: false, viewBy: Target)
+          interrupts: table(dataType: Interrupts, fightIDs: $fightIDs, hostilityType: Friendlies, translate: false, viewBy: Source)
+          dispels: table(dataType: Dispels, fightIDs: $fightIDs, hostilityType: Friendlies, translate: false, viewBy: Source)
+          wdps: rankings(fightIDs: $fightIDs, playerMetric: wdps)
+          dpsRank: rankings(fightIDs: $fightIDs, playerMetric: dps)
         }
       }
     }
     """
-    def shape(v: Any) -> Any:
-        if isinstance(v, dict):
-            out = {}
-            for k, val in v.items():
-                if isinstance(val, list):
-                    out[k] = {"len": len(val), "sample": [shape(x) for x in val[:2]]}
-                elif isinstance(val, dict):
-                    out[k] = shape(val)
-                else:
-                    out[k] = val
-            return out
-        if isinstance(v, list):
-            return {"len": len(v), "sample": [shape(x) for x in v[:2]]}
-        return v
+
+    fight_query = """
+    query AnalysisFight($code: String!, $fightIDs: [Int]) {
+      reportData {
+        report(code: $code) {
+          damage: table(dataType: DamageDone, fightIDs: $fightIDs, hostilityType: Friendlies, translate: false, viewBy: Source)
+          healing: table(dataType: Healing, fightIDs: $fightIDs, hostilityType: Friendlies, translate: false, viewBy: Source)
+          deaths: table(dataType: Deaths, fightIDs: $fightIDs, hostilityType: Friendlies, translate: false, viewBy: Source)
+        }
+      }
+    }
+    """
+
+    def table_entries(value: Any) -> list[dict[str, Any]]:
+        if not isinstance(value, dict):
+            return []
+        data = value.get("data")
+        if not isinstance(data, dict):
+            return []
+        entries = data.get("entries")
+        return entries if isinstance(entries, list) else []
+
+    def simple_targets(entry: dict[str, Any]) -> list[dict[str, Any]]:
+        values = entry.get("targets") or entry.get("sources") or []
+        if not isinstance(values, list):
+            return []
+        return [
+            {
+                "name": x.get("name"),
+                "total": x.get("total"),
+                "totalReduced": x.get("totalReduced"),
+                "type": x.get("type"),
+            }
+            for x in values
+            if isinstance(x, dict)
+        ]
+
+    def simple_abilities(entry: dict[str, Any]) -> list[dict[str, Any]]:
+        values = entry.get("abilities") or []
+        if not isinstance(values, list):
+            return []
+        return [
+            {
+                "name": x.get("name"),
+                "guid": x.get("guid"),
+                "total": x.get("total"),
+                "totalReduced": x.get("totalReduced"),
+                "type": x.get("type"),
+            }
+            for x in values
+            if isinstance(x, dict)
+        ]
+
+    def simple_death(entry: dict[str, Any]) -> dict[str, Any]:
+        damage = entry.get("damage") if isinstance(entry.get("damage"), dict) else {}
+        healing = entry.get("healing") if isinstance(entry.get("healing"), dict) else {}
+        events = entry.get("events") if isinstance(entry.get("events"), list) else []
+        return {
+            "name": entry.get("name"),
+            "id": entry.get("id"),
+            "timestamp": entry.get("timestamp"),
+            "fight": entry.get("fight"),
+            "deathWindow": entry.get("deathWindow"),
+            "overkill": entry.get("overkill"),
+            "killingBlow": entry.get("killingBlow"),
+            "damageTotal": damage.get("total"),
+            "damageSources": simple_targets(damage),
+            "damageAbilities": simple_abilities(damage),
+            "healingTotal": healing.get("total"),
+            "events": [
+                {
+                    "timestamp": e.get("timestamp"),
+                    "type": e.get("type"),
+                    "sourceID": e.get("sourceID"),
+                    "targetID": e.get("targetID"),
+                    "ability": e.get("ability"),
+                    "amount": e.get("amount"),
+                    "overkill": e.get("overkill"),
+                    "absorbed": e.get("absorbed"),
+                    "mitigated": e.get("mitigated"),
+                    "unmitigatedAmount": e.get("unmitigatedAmount"),
+                }
+                for e in events[-5:]
+                if isinstance(e, dict)
+            ],
+        }
+
+    def compact_nested(value: Any, depth: int = 0) -> Any:
+        if depth > 6:
+            return None
+        if isinstance(value, list):
+            return [compact_nested(x, depth + 1) for x in value]
+        if isinstance(value, dict):
+            keep = {}
+            for k, v in value.items():
+                if k in {"gear", "talents"}:
+                    continue
+                keep[k] = compact_nested(v, depth + 1)
+            return keep
+        return value
 
     for code in codes:
         try:
             summary = _graphql(summary_query, {"code": code})
-            print("WCLPROBE_SUMMARY " + _json(summary), flush=True)
-            report = (((summary.get("data") or {}).get("reportData") or {}).get("report") or {})
-            fights = [f for f in (report.get("fights") or []) if f.get("encounterID")]
-            if fights:
-                sample_fight = fights[-1]
-                sample = _graphql(sample_query, {"code": code, "fightIDs": [sample_fight["id"]]})
-                print(
-                    "WCLPROBE_SAMPLE "
-                    + _json({"code": code, "fight": sample_fight, "shape": shape(sample)}),
-                    flush=True,
-                )
+            rep = (((summary.get("data") or {}).get("reportData") or {}).get("report") or {})
+            actors = rep.get("masterData", {}).get("actors", []) if isinstance(rep.get("masterData"), dict) else []
+            actor_map = {a.get("id"): a for a in actors if isinstance(a, dict)}
+            fights = rep.get("fights") or []
+            fight_ids = [f.get("id") for f in fights if f.get("id") is not None]
+
+            print("WCLDATA_META " + _json({
+                "code": code,
+                "title": rep.get("title"),
+                "rateLimit": (summary.get("data") or {}).get("rateLimitData"),
+                "actors": [
+                    {"id": a.get("id"), "name": a.get("name"), "type": a.get("type"), "subType": a.get("subType")}
+                    for a in actors
+                    if a.get("type") == "Player"
+                ],
+                "fights": fights,
+            }), flush=True)
+
+            aggregate = _graphql(aggregate_query, {"code": code, "fightIDs": fight_ids})
+            ar = (((aggregate.get("data") or {}).get("reportData") or {}).get("report") or {})
+
+            for e in table_entries(ar.get("damage")):
+                print("WCLDATA_AGG_DAMAGE " + _json({
+                    "code": code, "name": e.get("name"), "id": e.get("id"), "type": e.get("type"),
+                    "icon": e.get("icon"), "itemLevel": e.get("itemLevel"),
+                    "total": e.get("total"), "activeTime": e.get("activeTime"),
+                    "targets": simple_targets(e), "abilities": simple_abilities(e),
+                }), flush=True)
+
+            for e in table_entries(ar.get("healing")):
+                print("WCLDATA_AGG_HEAL " + _json({
+                    "code": code, "name": e.get("name"), "id": e.get("id"), "type": e.get("type"),
+                    "icon": e.get("icon"), "itemLevel": e.get("itemLevel"),
+                    "total": e.get("total"), "activeTime": e.get("activeTime"), "overheal": e.get("overheal"),
+                    "targets": simple_targets(e), "abilities": simple_abilities(e),
+                }), flush=True)
+
+            for e in table_entries(ar.get("casts")):
+                print("WCLDATA_AGG_CASTS " + _json({
+                    "code": code, "name": e.get("name"), "id": e.get("id"), "type": e.get("type"),
+                    "icon": e.get("icon"), "itemLevel": e.get("itemLevel"),
+                    "total": e.get("total"), "activeTime": e.get("activeTime"),
+                    "abilities": simple_abilities(e),
+                }), flush=True)
+
+            for e in table_entries(ar.get("taken")):
+                print("WCLDATA_AGG_TAKEN " + _json({
+                    "code": code, "name": e.get("name"), "id": e.get("id"), "type": e.get("type"),
+                    "icon": e.get("icon"), "itemLevel": e.get("itemLevel"),
+                    "total": e.get("total"), "totalReduced": e.get("totalReduced"),
+                    "activeTime": e.get("activeTime"),
+                    "sources": simple_targets(e), "abilities": simple_abilities(e),
+                }), flush=True)
+
+            for e in table_entries(ar.get("deaths")):
+                print("WCLDATA_AGG_DEATH " + _json({"code": code, **simple_death(e)}), flush=True)
+
+            print("WCLDATA_DEBUFFS " + _json({"code": code, "data": compact_nested(ar.get("debuffs"))}), flush=True)
+            print("WCLDATA_INTERRUPTS " + _json({"code": code, "data": compact_nested(ar.get("interrupts"))}), flush=True)
+            print("WCLDATA_DISPELS " + _json({"code": code, "data": compact_nested(ar.get("dispels"))}), flush=True)
+            print("WCLDATA_WDPS " + _json({"code": code, "data": ar.get("wdps")}), flush=True)
+            print("WCLDATA_DPSRANK " + _json({"code": code, "data": ar.get("dpsRank")}), flush=True)
+
+            for f in fights:
+                fid = f.get("id")
+                if fid is None:
+                    continue
+                fq = _graphql(fight_query, {"code": code, "fightIDs": [fid]})
+                fr = (((fq.get("data") or {}).get("reportData") or {}).get("report") or {})
+                damage_rows = []
+                for e in table_entries(fr.get("damage")):
+                    damage_rows.append({
+                        "name": e.get("name"), "id": e.get("id"), "type": e.get("type"),
+                        "icon": e.get("icon"), "itemLevel": e.get("itemLevel"),
+                        "total": e.get("total"), "activeTime": e.get("activeTime"),
+                        "targets": simple_targets(e),
+                    })
+                healing_rows = []
+                for e in table_entries(fr.get("healing")):
+                    healing_rows.append({
+                        "name": e.get("name"), "id": e.get("id"), "type": e.get("type"),
+                        "icon": e.get("icon"), "itemLevel": e.get("itemLevel"),
+                        "total": e.get("total"), "activeTime": e.get("activeTime"), "overheal": e.get("overheal"),
+                    })
+                death_rows = [simple_death(e) for e in table_entries(fr.get("deaths"))]
+                roster = []
+                pids = f.get("friendlyPlayers") or []
+                specs = f.get("friendlySpecs") or []
+                ilvls = f.get("friendlyItemLevels") or []
+                for i, pid in enumerate(pids):
+                    a = actor_map.get(pid, {})
+                    roster.append({
+                        "id": pid, "name": a.get("name"), "class": a.get("subType"),
+                        "spec": specs[i] if i < len(specs) else None,
+                        "itemLevel": ilvls[i] if i < len(ilvls) else None,
+                    })
+                print("WCLDATA_FIGHT " + _json({
+                    "code": code, "fight": {
+                        "id": fid, "startTime": f.get("startTime"), "endTime": f.get("endTime"),
+                        "duration": (f.get("endTime") or 0) - (f.get("startTime") or 0),
+                        "kill": f.get("kill"), "fightPercentage": f.get("fightPercentage"),
+                        "bossPercentage": f.get("bossPercentage"), "averageItemLevel": f.get("averageItemLevel"),
+                    },
+                    "roster": roster, "damage": damage_rows, "healing": healing_rows, "deaths": death_rows,
+                }), flush=True)
+
         except Exception as exc:
-            print("WCLPROBE_ERROR " + _json({"code": code, "error": repr(exc)}), flush=True)
+            print("WCLDATA_ERROR " + _json({"code": code, "error": repr(exc)}), flush=True)
 
 
 if __name__ == "__main__":
