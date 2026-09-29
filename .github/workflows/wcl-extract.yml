@@ -1,0 +1,42 @@
+name: WCL data extract
+
+on:
+  push:
+    branches:
+      - chatgpt-wcl-analysis
+
+permissions:
+  contents: read
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install curl-cffi
+        run: pip install curl-cffi
+      - name: Fetch WCL fights
+        shell: bash
+        run: |
+          cat > /tmp/fetch.py <<'PY'
+          import json
+          from curl_cffi import requests
+          BASE="https://www.warcraftlogs.com"
+          codes=["Cq2Lm6ZJQ8pFKY91","McHnAzfxQPKqg9j8"]
+          s=requests.Session()
+          for code in codes:
+              s.get(f"{BASE}/reports/{code}", impersonate="chrome", timeout=30)
+              h={"Referer":f"{BASE}/reports/{code}","X-Requested-With":"XMLHttpRequest","Accept":"application/json, text/javascript, */*; q=0.01"}
+              r=s.get(f"{BASE}/reports/fights-and-participants/{code}/0?lang=en", impersonate="chrome", headers=h, timeout=30)
+              r.raise_for_status()
+              open(f"{code}_fights.json","w",encoding="utf-8").write(r.text)
+          PY
+          python /tmp/fetch.py
+      - name: Upload WCL data
+        uses: actions/upload-artifact@v4
+        with:
+          name: wcl-fights
+          path: '*_fights.json'
