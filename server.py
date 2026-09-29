@@ -259,6 +259,18 @@ def warcraftlogs_graphql(query: str, variables_json: str = "{}") -> str:
 
 
 if __name__ == "__main__":
+    # Fail fast if the configured Warcraft Logs credentials cannot authenticate.
+    _graphql("""
+    query StartupAuthCheck {
+      rateLimitData {
+        limitPerHour
+        pointsSpentThisHour
+        pointsResetIn
+      }
+    }
+    """)
+    print("Warcraft Logs API authentication OK", flush=True)
+
     port = int(os.getenv("PORT", "10000"))
     security = TransportSecuritySettings(enable_dns_rebinding_protection=False)
 
