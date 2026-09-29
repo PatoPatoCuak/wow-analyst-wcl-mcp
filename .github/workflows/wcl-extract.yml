@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - chatgpt-wcl-analysis
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -22,12 +23,11 @@ jobs:
         shell: bash
         run: |
           cat > /tmp/fetch.py <<'PY'
-          import json
           from curl_cffi import requests
           BASE="https://www.warcraftlogs.com"
           codes=["Cq2Lm6ZJQ8pFKY91","McHnAzfxQPKqg9j8"]
-          s=requests.Session()
           for code in codes:
+              s=requests.Session()
               s.get(f"{BASE}/reports/{code}", impersonate="chrome", timeout=30)
               h={"Referer":f"{BASE}/reports/{code}","X-Requested-With":"XMLHttpRequest","Accept":"application/json, text/javascript, */*; q=0.01"}
               r=s.get(f"{BASE}/reports/fights-and-participants/{code}/0?lang=en", impersonate="chrome", headers=h, timeout=30)
